@@ -1,11 +1,19 @@
-# Makefile Project Template
+# Buddy Memory Manager
 
 Steps to configure, build, run, and test the project.
 
 ## Building
 
 ```bash
-make
+make build
+```
+
+## Running
+
+For some reason, running the `make run` command will fail to start the program. Running it through Cargo or the binary itself is fine though.
+
+```bash
+cargo run --release
 ```
 
 ## Testing
@@ -18,6 +26,20 @@ make check
 
 ```bash
 make clean
+```
+
+## Generate Documentation
+
+Using the below command will generate the documentation and open it in your system's default browser.
+
+```bash
+make docs
+```
+
+Using the below command will generate the documentation under `target/doc` and will **_not_** open it automatically.
+
+```bash
+make docs-no-open
 ```
 
 ## Install Dependencies
