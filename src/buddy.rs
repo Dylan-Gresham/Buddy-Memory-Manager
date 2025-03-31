@@ -1,5 +1,6 @@
 use libc::{memset, mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use std::ptr;
+use std::ffi::c_void;
 
 pub const DEFAULT_K: usize = 30;
 pub const MIN_K: usize = 20;
@@ -24,7 +25,7 @@ pub struct Avail {
 pub struct BuddyPool {
     pub kval_m: usize,         // Max kval of this pool
     pub numbytes: usize,       // Number of bytes in this pool
-    pub base: *mut u8,         // Base address for memory calculations
+    pub base: *mut c_void,     // Base address for memory calculations
     pub avail: [Avail; MAX_K], // Array of available memory blocks
 }
 
@@ -68,9 +69,9 @@ pub extern "C" fn buddy_init(pool: *mut BuddyPool, size: usize) {
             MAP_PRIVATE | MAP_ANONYMOUS,
             -1,
             0,
-        ) as *mut u8;
+        );
         
-        if (*pool).base == MAP_FAILED as *mut u8 {
+        if (*pool).base == MAP_FAILED {
             panic!("buddy_init avail array mmap failed");
         }
         
@@ -97,6 +98,7 @@ pub extern "C" fn buddy_destroy(pool: *mut BuddyPool) {
         if munmap((*pool).base as *mut _, (*pool).numbytes) == -1 {
             panic!("buddy_destroy avail array");
         }
+
         memset(pool as *mut _, 0, std::mem::size_of::<BuddyPool>());
     }
 }
