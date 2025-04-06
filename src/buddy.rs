@@ -43,8 +43,20 @@ pub struct BuddyPool {
 /// - K The number of bytes expressed as 2^K
 #[no_mangle]
 pub extern "C" fn btok(bytes: usize) -> usize {
-    // Implementation here
-    0
+    // Return the smallest block size if no bytes are requested
+    if bytes == 0 {
+        return SMALLEST_K;
+    }
+
+    // Initialize k to the smallest block size
+    let mut k = SMALLEST_K;
+
+    // Iterate to find the smallest k where 2^k >= to the requested number of bytes
+    while (1 << k) < bytes {
+        k += 1
+    }
+
+    k
 }
 
 
@@ -59,8 +71,54 @@ pub extern "C" fn btok(bytes: usize) -> usize {
 ///  - A pointer to the buddy. Type = `*mut Avail`
 #[no_mangle]
 pub extern "C" fn buddy_calc(pool: *mut BuddyPool, buddy: *mut Avail) -> *mut Avail {
-    // Implementation here
-    std::ptr::null_mut()
+    unsafe {
+        // Calculate the offset of the current block from the base of the pool
+        let offset = (buddy as usize) - ((*pool).base as usize);
+
+        // Get the size of the buddy block based on its kval
+        let size = 1 << (*buddy).kval;
+
+        // Calculate the offset of the buddy block by XORing the original block's offset with its
+        // size
+        let buddy_offset = offset ^ size;
+
+        // Return a pointer to the buddy block by adding the buddy offset to the pool's base
+        // address
+        ((*pool).base as usize + buddy_offset) as *mut Avail
+    }
+}
+
+/// Helper function.
+///
+/// Removes a block from the free list.
+unsafe fn remove_block(block: *mut Avail) {
+    // Update the previous pointer of the block's next block
+    (*(*block).prev).next = (*block).next;
+    //
+    // Update the next pointer of the block's previous block
+    (*(*block).next).prev = (*block).prev;
+}
+
+
+/// Helper function.
+///
+/// Inserts a block into the free list at kval
+unsafe fn insert_block(pool: *mut BuddyPool, block: *mut Avail, kval: usize) {
+    // Get the head of the linked list for blocks of size 2^k where k = kval
+    let head = &mut (*pool).avail[kval];
+
+    // Insert the block at the head of the list
+    (*block).next = head.next;
+    (*block).prev = head;
+
+    // Update the next pointer of the block's previous node
+    (*head.next).prev = block;
+
+    // Update the head's next pointer to the new block
+    (*head).next = block;
+
+    // Set the block's tag to indicate its available
+    (*block).tag = BLOCK_AVAIL;
 }
 
 /// Allocates a block of size bytes of memory, returning a pointer to
@@ -80,8 +138,57 @@ pub extern "C" fn buddy_calc(pool: *mut BuddyPool, buddy: *mut Avail) -> *mut Av
 /// - A pointer to the memory block. Type = `*mut c_void`
 #[no_mangle]
 pub extern "C" fn buddy_malloc(pool: *mut BuddyPool, size: usize) -> *mut c_void {
-    // Implementation here
-    std::ptr::null_mut()
+    // Return null pointer if pool is null or size is 0
+    if pool.is_null() || size == 0 {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        // Calculate the required block size (including space for the header)
+        let req_k = btok(size + std::mem::size_of::<Avail>());
+        let mut k = req_k; 
+
+        // Search for the first available block of sufficient size
+        while k <= (*pool).kval_m && (*pool).avail[k].next == &mut (*pool).avail[k] {
+            k += 1;
+        }
+
+        // If no block is found, return null (memory not available)
+        if k > (*pool).kval_m {
+            return ptr::null_mut();
+        }
+
+        // Split blocks down to the required size (req_k)
+        while k > req_k {
+            let block = (*pool).avail[k].next;
+            remove_block(block);
+
+            k -= 1;
+            let buddy = (block as usize + (1 << k)) as *mut Avail;
+            (*buddy).tag = BLOCK_AVAIL;
+            (*buddy).next = &mut (*pool).avail[k];
+            (*buddy).prev = &mut (*pool).avail[k];
+
+            // Update the kval of the block and its buddy
+            (*block).kval = k as u16;
+            (*block).tag = BLOCK_AVAIL;
+            (*buddy).kval = k as u16;
+
+            // Insert both blocks back into the pool's available list
+            insert_block(pool, block, k);
+            insert_block(pool, buddy, k);
+        }
+
+        // Allocate the block (remove it from the available list)
+        let result = (*pool).avail[k].next;
+        remove_block(result);
+
+        // Mark the block as reserved
+        (*result).tag = BLOCK_RESERVED;
+
+        // Return the memory location after the block header (pointer to the user data)
+        (result as *mut u8).add(std::mem::size_of::<Avail>()) as *mut c_void
+    }
 }
 
 /// A block of memory previously allocated by a call to malloc,
@@ -101,7 +208,46 @@ pub extern "C" fn buddy_malloc(pool: *mut BuddyPool, size: usize) -> *mut c_void
 /// - ptr `*mut c_void` Pointer to the memory block to free
 #[no_mangle]
 pub extern "C" fn buddy_free(pool: *mut BuddyPool, ptr: *mut c_void) {
-    // Implementation here
+    // Return early if the pointer is null or the pool is null
+    if ptr.is_null() || pool.is_null() {
+        return;
+    }
+
+    unsafe {
+        // Get the block header by subtracting the size of Avail from the pointer
+        let mut block = (ptr as *mut u8).sub(std::mem::size_of::<Avail>()) as *mut Avail;
+
+        // Get the kval (block size exponent) of the block
+        let mut kval = (*block).kval;
+        let mut buddy;
+
+        // Try to coalesce the block with its buddy if they are both available
+        loop {
+            buddy = buddy_calc(pool, block);
+
+            // If the buddy is available or has a different size, break out of the loop
+            if (*buddy).tag != BLOCK_AVAIL || (*buddy).kval != kval {
+                break;
+            }
+
+            // Remove the buddy from the available list
+            remove_block(buddy);
+
+            // If the buddy is smaller in address, update block to point to it
+            if buddy < block {
+                block = buddy;
+            }
+
+            // Increase the kval (combine blocks into a larger one)
+            kval += 1;
+        }
+
+        // Update the kval of the block
+        (*block).kval = kval;
+
+        // Insert the block back into the available list
+        insert_block(pool, block, kval as usize);
+    }
 }
 
 /// Initialize a new memory pool using the buddy algorithm. Internally,
@@ -182,3 +328,219 @@ pub extern "C" fn buddy_destroy(pool: *mut BuddyPool) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::MaybeUninit;
+
+    fn check_buddy_pool_full(pool: &mut BuddyPool) {
+        for i in 0..pool.kval_m {
+            let avail = &pool.avail[i];
+            assert_eq!(avail.next as *const _, avail as *const _);
+            assert_eq!(avail.prev as *const _, avail as *const _);
+            assert_eq!(avail.tag, BLOCK_UNUSED);
+            assert_eq!(avail.kval as usize, i);
+        }
+
+        let top = &pool.avail[pool.kval_m];
+        unsafe {
+            assert_eq!((*top.next).tag, BLOCK_AVAIL);
+            assert_eq!((*top.next).next, top as *const _ as *mut _);
+            assert_eq!((*top.prev).prev, top as *const _ as *mut _);
+            assert_eq!(top.next, pool.base as *mut Avail);
+        }
+    }
+
+    fn check_buddy_pool_empty(pool: &mut BuddyPool) {
+        // All avail lists should be empty
+        for i in 0..=pool.kval_m {
+            let avail = &pool.avail[i];
+            assert_eq!(avail.next as *const _, avail as *const _);
+            assert_eq!(avail.prev as *const _, avail as *const _);
+            assert_eq!(avail.tag, BLOCK_UNUSED);
+            assert_eq!(avail.kval as usize, i);
+        }
+    }
+
+    #[test]
+    fn test_buddy_malloc_one_byte() {
+        let kval = MIN_K as usize;
+        let size = 1 << kval;
+
+        let mut pool = MaybeUninit::<BuddyPool>::uninit();
+        let pool_ptr = pool.as_mut_ptr();
+
+        unsafe {
+            buddy_init(pool_ptr, size);
+            let pool_ref = &mut *pool_ptr;
+
+            let mem = buddy_malloc(pool_ref, 1);
+            assert!(!mem.is_null());
+
+            buddy_free(pool_ref, mem);
+            check_buddy_pool_full(pool_ref);
+
+            buddy_destroy(pool_ref);
+        }
+    }
+
+    #[test]
+    fn test_buddy_malloc_one_large() {
+        let size = 1 << MIN_K;
+
+        let mut pool = MaybeUninit::<BuddyPool>::uninit();
+        let pool_ptr = pool.as_mut_ptr();
+        
+        unsafe {
+            buddy_init(pool_ptr, size);
+            let pool_ref = &mut *pool_ptr;
+
+            let ask = size - std::mem::size_of::<Avail>();
+            let mem = buddy_malloc(pool_ref, ask);
+            assert!(!mem.is_null());
+
+            let block = (mem as *mut u8).offset(-(std::mem::size_of::<Avail>() as isize)) as *mut Avail;
+            assert_eq!((*block).kval as usize, MIN_K);
+            assert_eq!((*block).tag, BLOCK_RESERVED);
+
+            check_buddy_pool_empty(pool_ref);
+
+            let fail = buddy_malloc(pool_ref, 5);
+            assert!(fail.is_null());
+
+            buddy_free(pool_ref, mem);
+            check_buddy_pool_full(pool_ref);
+
+            buddy_destroy(pool_ref);
+        }
+    }
+
+    #[test]
+    fn test_buddy_init() {
+        for i in MIN_K as usize..=DEFAULT_K as usize {
+            let size = 1 << i;
+            
+            let mut pool = MaybeUninit::<BuddyPool>::uninit();
+            let pool_ptr = pool.as_mut_ptr();
+
+            unsafe {
+                buddy_init(pool_ptr, size);
+                let pool_ref = &mut *pool_ptr;
+
+                check_buddy_pool_full(pool_ref);
+                buddy_destroy(pool_ref);
+            }
+        }
+    }
+
+    #[test]
+    fn test_buddy_calc_basic_pairs() {
+        const TEST_K: usize = MIN_K + 2;
+        let pool_size = 1 << TEST_K;
+
+        let mut pool = MaybeUninit::<BuddyPool>::uninit();
+        let pool_ptr = pool.as_mut_ptr();
+
+        unsafe {
+            buddy_init(pool_ptr, pool_size);
+            let pool_ref = &mut *pool_ptr;
+
+            // Allocate 2 small blocks manually by splitting top-level block
+            let top_block = pool_ref.avail[TEST_K].next;
+            assert_eq!((*top_block).tag, BLOCK_AVAIL);
+
+            // Remove top block from the free list
+            remove_block(top_block);
+
+            // Split it into two buddies
+            let kval = TEST_K - 1;
+            let block1 = top_block;
+            let block2 = (block1 as usize + (1 << kval)) as *mut Avail;
+
+            (*block1).kval = kval as u16;
+            (*block2).kval = kval as u16;
+
+            // Calculate each other as buddy
+            let b1 = buddy_calc(pool_ref, block1);
+            let b2 = buddy_calc(pool_ref, block2);
+
+            assert_eq!(b1, block2, "Buddy of block1 should be block2");
+            assert_eq!(b2, block1, "Buddy of block2 should be block1");
+
+            // Check that buddy address is offset by correct power of two
+            let offset1 = (block1 as usize) - (pool_ref.base as usize);
+            let offset2 = (block2 as usize) - (pool_ref.base as usize);
+            assert_eq!(offset1 ^ offset2, 1 << kval);
+
+            buddy_destroy(pool_ref);
+        }
+    }
+
+    #[test]
+    fn test_buddy_calc_recursive_coalescing() {
+        const BASE_K: usize = MIN_K + 3; // 2^7 = 128 bytes
+        let pool_size = 1 << BASE_K;
+    
+        let mut pool = MaybeUninit::<BuddyPool>::uninit();
+        let pool_ptr = pool.as_mut_ptr();
+    
+        unsafe {
+            buddy_init(pool_ptr, pool_size);
+            let pool_ref = &mut *pool_ptr;
+    
+            // Manually take the top block
+            let top_block = pool_ref.avail[BASE_K].next;
+            remove_block(top_block);
+    
+            // Split into two level BASE_K - 1 blocks
+            let k1 = BASE_K - 1;
+            let left1 = top_block;
+            let right1 = (left1 as usize + (1 << k1)) as *mut Avail;
+            (*left1).kval = k1 as u16;
+            (*right1).kval = k1 as u16;
+    
+            // Split left1 into two BASE_K - 2 blocks
+            let k2 = k1 - 1;
+            let left2 = left1;
+            let right2 = (left2 as usize + (1 << k2)) as *mut Avail;
+            (*left2).kval = k2 as u16;
+            (*right2).kval = k2 as u16;
+    
+            // Split left2 again
+            let k3 = k2 - 1;
+            let left3 = left2;
+            let right3 = (left3 as usize + (1 << k3)) as *mut Avail;
+            (*left3).kval = k3 as u16;
+            (*right3).kval = k3 as u16;
+    
+            // Now free right3 and left3 and ensure they coalesce into left2
+            insert_block(pool_ref, left3, k3);
+            insert_block(pool_ref, right3, k3);
+    
+            let buddy_of_left3 = buddy_calc(pool_ref, left3);
+            assert_eq!(buddy_of_left3, right3, "Buddy of left3 should be right3");
+    
+            // Remove both from free list to simulate coalescing
+            remove_block(left3);
+            remove_block(right3);
+    
+            // Merge into left2
+            let merged_kval = k3 + 1;
+            let merged_block = if left3 < right3 { left3 } else { right3 };
+            (*merged_block).kval = merged_kval as u16;
+    
+            // Check buddy of merged_block is still correct
+            let buddy = buddy_calc(pool_ref, merged_block);
+            let expected_offset = 1 << merged_kval;
+            let offset_diff = (buddy as usize).wrapping_sub(merged_block as usize);
+            assert_eq!(offset_diff, expected_offset, "Merged block buddy is offset correctly");
+    
+            buddy_destroy(pool_ref);
+        }
+    }
+
+    #[test]
+    fn test_btok_one() {
+        assert_eq!(6, btok(1));
+    }
+}
