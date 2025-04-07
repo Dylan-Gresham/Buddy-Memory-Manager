@@ -1,5 +1,5 @@
 .PHONY: all
-all: clean build docs-no-open check run
+all: clean build docs-no-open check
 
 .PHONY: clean
 clean:
@@ -17,9 +17,6 @@ check:
 	@cargo test --no-fail-fast --release
 	@LD_LIBRARY_PATH=./target/release ./test_buddy_c
 	@LD_LIBRARY_PATH=./target/release ./test_buddy_cpp
-
-run:
-	@cargo -q run --release
 
 docs:
 	@cargo -q doc --open
