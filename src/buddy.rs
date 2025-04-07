@@ -1,4 +1,4 @@
-use libc::{memset, mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+use libc::{memset, mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, __errno_location, ENOMEM};
 use std::ptr;
 use std::ffi::c_void;
 
@@ -156,8 +156,11 @@ pub extern "C" fn buddy_malloc(pool: *mut BuddyPool, size: usize) -> *mut c_void
             k += 1;
         }
 
-        // If no block is found, return null (memory not available)
+        // If no block is found, set errno and return null (memory not available)
         if k > (*pool).kval_m {
+            // Set errno to ENOMEM
+            (*__errno_location()) = ENOMEM;
+
             return ptr::null_mut();
         }
 
