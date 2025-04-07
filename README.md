@@ -2,6 +2,16 @@
 
 Steps to configure, build, run, and test the project.
 
+## System Build Requirements
+
+To build the C bindings, `cbindgen` is required and can be installed with the below command.
+
+```bash
+cargo install --force cbindgen
+```
+
+The `--force` option makes it update to the latest version of `cbindgen` if it is already present on the system.
+
 ## Building
 
 ```bash
