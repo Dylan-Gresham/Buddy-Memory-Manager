@@ -45,11 +45,11 @@ pub struct BuddyPool {
 pub extern "C" fn btok(bytes: usize) -> usize {
     // Return the smallest block size if no bytes are requested
     if bytes == 0 {
-        return SMALLEST_K;
+        return 0;
     }
 
     // Initialize k to the smallest block size
-    let mut k = SMALLEST_K;
+    let mut k = 0;
 
     // Iterate to find the smallest k where 2^k >= to the requested number of bytes
     while (1 << k) < bytes {
@@ -145,10 +145,13 @@ pub extern "C" fn buddy_malloc(pool: *mut BuddyPool, size: usize) -> *mut c_void
 
     unsafe {
         // Calculate the required block size (including space for the header)
-        let req_k = btok(size + std::mem::size_of::<Avail>());
-        let mut k = req_k; 
+        let mut req_k = btok(size + std::mem::size_of::<Avail>());
+        if req_k < SMALLEST_K {
+            req_k = SMALLEST_K;
+        }
 
         // Search for the first available block of sufficient size
+        let mut k = req_k; 
         while k <= (*pool).kval_m && (*pool).avail[k].next == &mut (*pool).avail[k] {
             k += 1;
         }
@@ -158,36 +161,29 @@ pub extern "C" fn buddy_malloc(pool: *mut BuddyPool, size: usize) -> *mut c_void
             return ptr::null_mut();
         }
 
+        let block = (*pool).avail[k].next;
+        remove_block(block);
+
         // Split blocks down to the required size (req_k)
         while k > req_k {
-            let block = (*pool).avail[k].next;
-            remove_block(block);
-
             k -= 1;
             let buddy = (block as usize + (1 << k)) as *mut Avail;
+
+            (*buddy).kval = k as u16;
             (*buddy).tag = BLOCK_AVAIL;
-            (*buddy).next = &mut (*pool).avail[k];
+            (*buddy).next = (*pool).avail[k].next;
             (*buddy).prev = &mut (*pool).avail[k];
 
-            // Update the kval of the block and its buddy
-            (*block).kval = k as u16;
-            (*block).tag = BLOCK_AVAIL;
-            (*buddy).kval = k as u16;
-
-            // Insert both blocks back into the pool's available list
-            insert_block(pool, block, k);
-            insert_block(pool, buddy, k);
+            (*(*pool).avail[k].next).prev = buddy;
+            (*pool).avail[k].next = buddy;
         }
 
-        // Allocate the block (remove it from the available list)
-        let result = (*pool).avail[k].next;
-        remove_block(result);
-
         // Mark the block as reserved
-        (*result).tag = BLOCK_RESERVED;
+        (*block).tag = BLOCK_RESERVED;
+        (*block).kval = k as u16;
 
         // Return the memory location after the block header (pointer to the user data)
-        (result as *mut u8).add(std::mem::size_of::<Avail>()) as *mut c_void
+        (block as *mut u8).add(std::mem::size_of::<Avail>()) as *mut c_void
     }
 }
 
@@ -217,16 +213,14 @@ pub extern "C" fn buddy_free(pool: *mut BuddyPool, ptr: *mut c_void) {
         // Get the block header by subtracting the size of Avail from the pointer
         let mut block = (ptr as *mut u8).sub(std::mem::size_of::<Avail>()) as *mut Avail;
 
-        // Get the kval (block size exponent) of the block
-        let mut kval = (*block).kval;
-        let mut buddy;
+        (*block).tag = BLOCK_AVAIL;
 
         // Try to coalesce the block with its buddy if they are both available
-        loop {
-            buddy = buddy_calc(pool, block);
+        while ((*block).kval as usize) < (*pool).kval_m {
+            let buddy = buddy_calc(pool, block);
 
             // If the buddy is available or has a different size, break out of the loop
-            if (*buddy).tag != BLOCK_AVAIL || (*buddy).kval != kval {
+            if (*buddy).tag != BLOCK_AVAIL || (*buddy).kval != (*block).kval {
                 break;
             }
 
@@ -239,14 +233,14 @@ pub extern "C" fn buddy_free(pool: *mut BuddyPool, ptr: *mut c_void) {
             }
 
             // Increase the kval (combine blocks into a larger one)
-            kval += 1;
+            (*block).kval += 1;
         }
 
-        // Update the kval of the block
-        (*block).kval = kval;
+        (*block).next = (*pool).avail[(*block).kval as usize].next;
+        (*block).prev = &mut (*pool).avail[(*block).kval as usize];
 
-        // Insert the block back into the available list
-        insert_block(pool, block, kval as usize);
+        (*(*pool).avail[(*block).kval as usize].next).prev = block;
+        (*pool).avail[(*block).kval as usize].next = block;
     }
 }
 
@@ -541,6 +535,6 @@ mod tests {
 
     #[test]
     fn test_btok_one() {
-        assert_eq!(6, btok(1));
+        assert_eq!(0, btok(1));
     }
 }

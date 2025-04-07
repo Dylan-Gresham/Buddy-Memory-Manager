@@ -1,5 +1,5 @@
 mod buddy;
 
 fn main() {
-    println!("Hello, world!");
+    println!("Nothing to see here...");
 }
