@@ -91,34 +91,13 @@ pub extern "C" fn buddy_calc(pool: *mut BuddyPool, buddy: *mut Avail) -> *mut Av
 /// Helper function.
 ///
 /// Removes a block from the free list.
-unsafe fn remove_block(block: *mut Avail) {
+#[no_mangle]
+pub unsafe extern "C" fn remove_block(block: *mut Avail) {
     // Update the previous pointer of the block's next block
     (*(*block).prev).next = (*block).next;
     //
     // Update the next pointer of the block's previous block
     (*(*block).next).prev = (*block).prev;
-}
-
-
-/// Helper function.
-///
-/// Inserts a block into the free list at kval
-unsafe fn insert_block(pool: *mut BuddyPool, block: *mut Avail, kval: usize) {
-    // Get the head of the linked list for blocks of size 2^k where k = kval
-    let head = &mut (*pool).avail[kval];
-
-    // Insert the block at the head of the list
-    (*block).next = head.next;
-    (*block).prev = head;
-
-    // Update the next pointer of the block's previous node
-    (*head.next).prev = block;
-
-    // Update the head's next pointer to the new block
-    (*head).next = block;
-
-    // Set the block's tag to indicate its available
-    (*block).tag = BLOCK_AVAIL;
 }
 
 /// Allocates a block of size bytes of memory, returning a pointer to
@@ -206,10 +185,10 @@ pub extern "C" fn buddy_malloc(pool: *mut BuddyPool, size: usize) -> *mut c_void
 /// - pool `*mut BuddyPool` The memory pool
 /// - ptr `*mut c_void` Pointer to the memory block to free
 #[no_mangle]
-pub extern "C" fn buddy_free(pool: *mut BuddyPool, ptr: *mut c_void) {
+pub extern "C" fn buddy_free(pool: *mut BuddyPool, ptr: *mut c_void) -> u8 {
     // Return early if the pointer is null or the pool is null
     if ptr.is_null() || pool.is_null() {
-        return;
+        return 1;
     }
 
     unsafe {
@@ -245,6 +224,9 @@ pub extern "C" fn buddy_free(pool: *mut BuddyPool, ptr: *mut c_void) {
         (*(*pool).avail[(*block).kval as usize].next).prev = block;
         (*pool).avail[(*block).kval as usize].next = block;
     }
+
+
+    0
 }
 
 /// Initialize a new memory pool using the buddy algorithm. Internally,
@@ -374,7 +356,7 @@ mod tests {
             let mem = buddy_malloc(pool_ref, 1);
             assert!(!mem.is_null());
 
-            buddy_free(pool_ref, mem);
+            assert_eq!(buddy_free(pool_ref, mem), 0);
             check_buddy_pool_full(pool_ref);
 
             buddy_destroy(pool_ref);
@@ -405,7 +387,7 @@ mod tests {
             let fail = buddy_malloc(pool_ref, 5);
             assert!(fail.is_null());
 
-            buddy_free(pool_ref, mem);
+            assert_eq!(buddy_free(pool_ref, mem), 0);
             check_buddy_pool_full(pool_ref);
 
             buddy_destroy(pool_ref);
@@ -471,6 +453,27 @@ mod tests {
 
             buddy_destroy(pool_ref);
         }
+    }
+
+    /// Helper function.
+    ///
+    /// Inserts a block into the free list at kval
+    unsafe fn insert_block(pool: *mut BuddyPool, block: *mut Avail, kval: usize) {
+        // Get the head of the linked list for blocks of size 2^k where k = kval
+        let head = &mut (*pool).avail[kval];
+    
+        // Insert the block at the head of the list
+        (*block).next = head.next;
+        (*block).prev = head;
+    
+        // Update the next pointer of the block's previous node
+        (*head.next).prev = block;
+    
+        // Update the head's next pointer to the new block
+        (*head).next = block;
+    
+        // Set the block's tag to indicate its available
+        (*block).tag = BLOCK_AVAIL;
     }
 
     #[test]
@@ -539,5 +542,43 @@ mod tests {
     #[test]
     fn test_btok_one() {
         assert_eq!(0, btok(1));
+    }
+
+    #[test]
+    fn test_btok_range() {
+        assert_eq!(0, btok(1));
+        assert_eq!(1, btok(2));
+        assert_eq!(2, btok(3));
+        assert_eq!(2, btok(4));
+        assert_eq!(3, btok(5));
+        assert_eq!(3, btok(8));
+        assert_eq!(4, btok(9));
+        assert_eq!(4, btok(16));
+        assert_eq!(5, btok(17));
+        assert_eq!(5, btok(32));
+        assert_eq!(6, btok(33));
+        assert_eq!(6, btok(64));
+        assert_eq!(10, btok(1024));
+        assert_eq!(11, btok(1025));
+        assert_eq!(40, btok(1099511627776));
+    }
+
+    #[test]
+    fn test_double_free() {
+        let mut pool = MaybeUninit::<BuddyPool>::uninit();
+        let pool_ptr = pool.as_mut_ptr();
+
+        unsafe {
+            buddy_init(pool_ptr, 128);
+            let pool_ref = &mut *pool_ptr;
+
+            let ptr = buddy_malloc(pool_ref, 64);
+            assert!(!ptr.is_null());
+
+            assert_eq!(buddy_free(pool_ref, ptr), 0);
+
+            // This free is undefined behavior and shouldn't fail
+            assert_eq!(buddy_free(pool_ref, ptr), 0);
+        }
     }
 }
