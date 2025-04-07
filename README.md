@@ -1,6 +1,6 @@
 # Buddy Memory Manager
 
-Steps to configure, build, run, and test the project.
+Steps to configure, build, and test the project.
 
 ## System Build Requirements
 
@@ -16,14 +16,6 @@ The `--force` option makes it update to the latest version of `cbindgen` if it i
 
 ```bash
 make build
-```
-
-## Running
-
-For some reason, running the `make run` command will fail to start the program. Running it through Cargo or the binary itself is fine though.
-
-```bash
-cargo run --release
 ```
 
 ## Testing
